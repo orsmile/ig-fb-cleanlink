@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         IG/FB Clean Link
 // @namespace    ig-fb-cleanlink
-// @version      0.4.1
+// @version      0.5.0
 // @description  複製 Instagram / Facebook 連結時自動去除追蹤碼；FB 的 /share/ 短連結會換成 permalink。
 // @match        https://www.facebook.com/*
 // @match        https://web.facebook.com/*
@@ -26,6 +26,7 @@
     resolveTimeoutMs: 8000,
     cleanMessenger: true, // 「以 Messenger 傳送」時把 share 連結換成 permalink
     messengerHoldMs: 10000, // Messenger 訊息等待解析的上限
+    rewriteAtSource: true, // 打開分享視窗時就把 FB 給的 share 連結換成 permalink
     blockOnFailure: true, // 轉換失敗時擋下 share 連結（不複製、不傳送）；false 則照原樣放行
     resolveRetries: 1, // 解析失敗後再試幾次
     debugLogSize: 200, // 除錯紀錄保留筆數
@@ -224,15 +225,51 @@
     return out;
   }
 
+  // ── share 連結的來源 ──
+  // 打開分享視窗時，FB 用 useLinkSharingCreateWrappedUrlMutation 向伺服器要 share 連結，
+  // 回應裡同時有原本的 permalink（original_content_url）和 share 連結（wrapped_url）。
+  // 在這裡把 wrapped_url 換掉，之後的複製、Messenger（含端對端加密聊天，封包無法事後改寫）、
+  // WhatsApp 等全部都會拿到乾淨連結。
+
+  const WRAP_MUTATION = 'useLinkSharingCreateWrappedUrlMutation';
+  const WRAPPED_RE = /"wrapped_url":"((?:[^"\\]|\\.)*)"/;
+  const ORIGINAL_RE = /"original_content_url":"((?:[^"\\]|\\.)*)"/;
+
+  /** @returns {{text:string, share:string, clean:string}|null} 回應裡沒有可以安全替換的內容就回傳 null */
+  function rewriteWrappedUrl(text) {
+    if (typeof text !== 'string') return null;
+    const w = WRAPPED_RE.exec(text);
+    const o = ORIGINAL_RE.exec(text);
+    if (!w || !o) return null;
+    let wrapped;
+    let original;
+    try {
+      wrapped = cleanUrl(JSON.parse('"' + w[1] + '"'));
+      original = cleanUrl(JSON.parse('"' + o[1] + '"'));
+    } catch {
+      return null;
+    }
+    if (!wrapped || !wrapped.needsResolve || !original || original.needsResolve) return null;
+    let value = JSON.stringify(original.url).slice(1, -1);
+    if (w[1].includes('\\/')) value = value.replace(/\//g, '\\/'); // 跟著原本的跳脫方式
+    return {
+      text: text.slice(0, w.index) + '"wrapped_url":"' + value + '"' + text.slice(w.index + w[0].length),
+      share: wrapped.url,
+      clean: original.url,
+    };
+  }
+
   if (typeof module !== 'undefined' && module.exports) {
-    module.exports = { cleanUrl, cleanText, extractCanonical, isFbSharePath, findShareInFrame, replaceShareInFrame };
+    module.exports = {
+      cleanUrl, cleanText, extractCanonical, isFbSharePath, findShareInFrame, replaceShareInFrame, rewriteWrappedUrl,
+    };
   }
   if (typeof window === 'undefined' || typeof document === 'undefined') return;
 
   // ───────────────────────── 瀏覽器端 ─────────────────────────
 
   // @grant none：腳本直接跑在頁面環境，才能攔到頁面自己的剪貼簿呼叫
-  const VERSION = '0.4.1'; // 與檔頭 @version 一致
+  const VERSION = '0.5.0'; // 與檔頭 @version 一致
   const running = window.__igFbCleanLink;
   if (running) {
     // 已有另一份在跑。版本不同代表 Tampermonkey 裡同時啟用了新舊兩份，新功能不會生效。
@@ -522,6 +559,70 @@
     });
   }
 
+  // ── 在來源就換掉 share 連結 ──
+  // 攔的是 JSON.parse 而不是 XHR 的回應：有些擴充功能會把 XMLHttpRequest 包一層，
+  // 改寫 responseText 會被它蓋掉；而 FB 不管用什麼方式收到回應，最後都要經過 JSON.parse。
+
+  const sourceCleaned = new Set(); // 已在來源換成 permalink 的連結，複製時用來顯示提示
+  const origParse = JSON.parse;
+  let sourceSeen = 0; // 看過幾次帶 wrapped_url 的回應
+  let warnedSource = false;
+
+  function warnSource(detail) {
+    record('source-not-rewritten', detail);
+    if (warnedSource) return;
+    warnedSource = true;
+    toast('⚠ 無法在來源換掉 share 連結；傳到加密聊天的訊息可能仍是 share 連結。FB 可能已改版，腳本需要更新', {
+      warning: true, actions: [logAction],
+    });
+  }
+
+  if (CONFIG.rewriteAtSource && FB_HOST.test(location.hostname)) {
+    JSON.parse = function (text, ...rest) {
+      // 先用長度擋掉絕大多數呼叫，避免拖慢 FB
+      if (typeof text === 'string' && text.length < 20000 && text.includes('"wrapped_url"')) {
+        sourceSeen++;
+        try {
+          const r = rewriteWrappedUrl(text);
+          if (r) {
+            sourceCleaned.add(r.clean);
+            resolveCache.set(r.share, Promise.resolve(r.clean)); // 萬一別處還是拿到 share 連結，不必再解析
+            record('source-rewritten', { url: r.share, clean: r.clean });
+            text = r.text;
+          } else {
+            // 例如分享的是外部網址：沒有 permalink 可換，交給後面的剪貼簿／封包攔截處理
+            record('source-skipped', { len: text.length, hasOriginal: text.includes('"original_content_url"') });
+          }
+        } catch (e) {
+          record('error', { where: 'JSON.parse hook', error: e });
+        }
+      }
+      return origParse.call(this, text, ...rest);
+    };
+
+    // FB 送出取得 share 連結的請求後，若回應沒有經過上面的改寫，代表格式變了
+    const xhrProto = window.XMLHttpRequest && window.XMLHttpRequest.prototype;
+    const origXhrSend = xhrProto && xhrProto.send;
+    if (origXhrSend) {
+      xhrProto.send = function (body) {
+        try {
+          const text = typeof body === 'string' ? body
+            : body instanceof URLSearchParams ? body.toString() : '';
+          if (text.includes(WRAP_MUTATION)) {
+            const before = sourceSeen;
+            const xhr = this;
+            xhr.addEventListener('loadend', () => setTimeout(() => {
+              if (sourceSeen === before) warnSource({ status: xhr.status, responseType: xhr.responseType });
+            }, 1500));
+          }
+        } catch (e) {
+          record('error', { where: 'xhr send', error: e });
+        }
+        return origXhrSend.apply(this, arguments);
+      };
+    }
+  }
+
   // ── 攔截剪貼簿寫入 ──
   // blockOnFailure 開啟時，share 連結不會先進剪貼簿，等解析成功才寫入乾淨連結；
   // 關閉時照舊：原本的寫入先進行，解析成功後再覆寫一次。
@@ -549,7 +650,10 @@
         resolveForCopy(r.url, text, false, 'writeText');
         return p;
       }
-      if (!r.changed) return origWriteText.call(this, text);
+      if (!r.changed) {
+        if (sourceCleaned.has(r.url)) toast('已複製乾淨連結：' + r.url);
+        return origWriteText.call(this, text);
+      }
       toast('已複製乾淨連結');
       return origWriteText.call(this, r.url);
     };
@@ -605,7 +709,11 @@
         resolveForCopy(r.url, text.trim(), CONFIG.blockOnFailure, 'copy-event');
         return;
       }
-      if (!r.changed || !e.clipboardData) return;
+      if (!r.changed) {
+        if (sourceCleaned.has(r.url)) toast('已複製乾淨連結：' + r.url);
+        return;
+      }
+      if (!e.clipboardData) return;
       e.clipboardData.setData('text/plain', r.url);
       e.preventDefault();
       toast('已複製乾淨連結');

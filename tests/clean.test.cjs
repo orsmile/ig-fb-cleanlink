@@ -118,3 +118,31 @@ test('檔頭 @version 與程式內的 VERSION 一致', () => {
   const inCode = /const VERSION = '([^']+)'/.exec(src)[1];
   assert.equal(header, inCode);
 });
+
+test('來源改寫：把 wrapped_url 換成 original_content_url', () => {
+  const { rewriteWrappedUrl } = require('../ig-fb-cleanlink.user.js');
+  const make = (original, wrapped) => JSON.stringify({
+    data: { xfb_create_share_url_wrapper: { share_url_wrapper: { id: '123', original_content_url: original, wrapped_url: wrapped } } },
+    extensions: { is_final: true },
+  });
+  const share = 'https://www.facebook.com/share/p/1AbCdEfGhJ/';
+  const r = rewriteWrappedUrl(make('https://www.facebook.com/someone/posts/pfbid02abc?__cft__[0]=AZX', share));
+  assert.equal(r.clean, 'https://www.facebook.com/someone/posts/pfbid02abc');
+  assert.equal(r.share, share);
+  const w = JSON.parse(r.text).data.xfb_create_share_url_wrapper.share_url_wrapper;
+  assert.equal(w.wrapped_url, 'https://www.facebook.com/someone/posts/pfbid02abc');
+  assert.match(w.original_content_url, /__cft__/); // 其他欄位不動
+
+  // 斜線有跳脫的寫法
+  const escaped = make('https://www.facebook.com/reel/123456789', share).replace(/\//g, '\/');
+  const r2 = rewriteWrappedUrl(escaped);
+  assert.ok(r2.text.includes('"wrapped_url":"https:\/\/www.facebook.com\/reel\/123456789"'));
+  assert.equal(JSON.parse(r2.text).data.xfb_create_share_url_wrapper.share_url_wrapper.wrapped_url, 'https://www.facebook.com/reel/123456789');
+
+  // 不該動的情況：原始連結不是 FB、wrapped 不是 share 連結、欄位不齊、非字串
+  assert.equal(rewriteWrappedUrl(make('https://example.com/a', share)), null);
+  assert.equal(rewriteWrappedUrl(make('https://www.facebook.com/reel/1', 'https://www.facebook.com/reel/1')), null);
+  assert.equal(rewriteWrappedUrl(make(share, share)), null);
+  assert.equal(rewriteWrappedUrl('{"wrapped_url":"' + share + '"}'), null);
+  assert.equal(rewriteWrappedUrl(undefined), null);
+});

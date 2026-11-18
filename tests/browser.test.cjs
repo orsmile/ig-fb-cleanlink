@@ -135,11 +135,27 @@ test('複製：execCommand 路徑也會擋下 share 連結', async () => {
   assert.deepEqual(env.written, ['https://www.facebook.com/reel/123456789']);
 });
 
+test('來源改寫：FB 解析 share 連結的回應時就換成 permalink', async () => {
+  env.written.length = 0;
+  const res = JSON.parse(JSON.stringify({ data: { xfb_create_share_url_wrapper: { share_url_wrapper: {
+    id: '1', original_content_url: 'https://www.facebook.com/page/posts/pfbid0xyz', wrapped_url: 'https://www.facebook.com/share/p/7SrcWrap/',
+  } } } }));
+  const clean = 'https://www.facebook.com/page/posts/pfbid0xyz';
+  assert.equal(res.data.xfb_create_share_url_wrapper.share_url_wrapper.wrapped_url, clean);
+  // 其他 JSON 不受影響
+  assert.deepEqual(JSON.parse('{"a":[1,2],"wrapped_url":"x"}'), { a: [1, 2], wrapped_url: 'x' });
+  assert.equal(JSON.parse('"2026-01-01"', (k, v) => v + '!'), '2026-01-01!');
+  // 之後複製到的已經是 permalink，照常寫入
+  await navigator.clipboard.writeText(clean);
+  assert.deepEqual(env.written, [clean]);
+  assert.match(toastEl().text, /已複製乾淨連結/);
+});
+
 test('除錯紀錄：失敗原因會留下來', async () => {
   const lines = window.__igFbCleanLinkLog().split('\n').map((l) => JSON.parse(l));
   assert.equal(lines[0].script, 'IG/FB Clean Link');
   const events = lines.map((l) => l.e);
-  for (const e of ['start', 'resolve-ok', 'resolve-failed', 'messenger-rewritten', 'messenger-failed', 'copy-share']) {
+  for (const e of ['start', 'source-rewritten', 'source-skipped', 'resolve-ok', 'resolve-failed', 'messenger-rewritten', 'messenger-failed', 'copy-share']) {
     assert.ok(events.includes(e), e);
   }
   const failed = lines.find((l) => l.e === 'messenger-failed');
