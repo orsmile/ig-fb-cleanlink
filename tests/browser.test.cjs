@@ -147,4 +147,8 @@ test('除錯紀錄：失敗原因會留下來', async () => {
   assert.match(failed.error.message, /Failed to fetch/);
   assert.match(failed.frame.near, /share/);
   assert.ok(JSON.parse(env.store['igFbCleanLink.log']).length > 0);
+  // FB 會清掉 localStorage：這個分頁的紀錄仍要拿得到
+  delete env.store['igFbCleanLink.log'];
+  const again = window.__igFbCleanLinkLog().split('\n');
+  assert.equal(again.length, lines.length);
 });

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         IG/FB Clean Link
 // @namespace    ig-fb-cleanlink
-// @version      0.4.0
+// @version      0.4.1
 // @description  複製 Instagram / Facebook 連結時自動去除追蹤碼；FB 的 /share/ 短連結會換成 permalink。
 // @match        https://www.facebook.com/*
 // @match        https://web.facebook.com/*
@@ -232,7 +232,7 @@
   // ───────────────────────── 瀏覽器端 ─────────────────────────
 
   // @grant none：腳本直接跑在頁面環境，才能攔到頁面自己的剪貼簿呼叫
-  const VERSION = '0.4.0'; // 與檔頭 @version 一致
+  const VERSION = '0.4.1'; // 與檔頭 @version 一致
   const running = window.__igFbCleanLink;
   if (running) {
     // 已有另一份在跑。版本不同代表 Tampermonkey 裡同時啟用了新舊兩份，新功能不會生效。
@@ -261,7 +261,9 @@
   // 取出方式：失敗提示上的「複製除錯紀錄」，或在 Console 執行 __igFbCleanLinkLog()
 
   const LOG_KEY = 'igFbCleanLink.log';
-  let unsaved = [];
+  const TAB = Math.random().toString(36).slice(2, 8);
+  const mine = []; // 這個分頁的紀錄。FB 會不定時清掉 localStorage，所以記憶體裡也留一份
+  let dirty = false;
   let saveTimer = 0;
 
   function errText(e) {
@@ -279,26 +281,35 @@
     }
   }
 
+  /** 已存檔的（含其他分頁寫的）加上這個分頁的，依時間排序。 */
+  function mergedLog() {
+    const saved = readLog();
+    const have = new Set(saved.map((x) => x.n));
+    const all = saved.concat(mine.filter((x) => !have.has(x.n)));
+    all.sort((a, b) => (a.t < b.t ? -1 : a.t > b.t ? 1 : 0));
+    return all.slice(-CONFIG.debugLogSize);
+  }
+
   function flushLog() {
     clearTimeout(saveTimer);
     saveTimer = 0;
-    if (!unsaved.length) return;
-    const all = readLog().concat(unsaved); // 重新讀取再合併，多個分頁才不會互相蓋掉
-    unsaved = [];
+    if (!dirty) return;
+    dirty = false;
     try {
-      localStorage.setItem(LOG_KEY, JSON.stringify(all.slice(-CONFIG.debugLogSize)));
+      localStorage.setItem(LOG_KEY, JSON.stringify(mergedLog()));
     } catch {
       // localStorage 不能用就只留在 console
     }
   }
 
   function record(event, data) {
-    const entry = { t: new Date().toISOString(), e: event };
+    const entry = { t: new Date().toISOString(), n: TAB + '-' + mine.length, e: event };
     for (const [k, v] of Object.entries(data || {})) {
       entry[k] = v instanceof Error ? Object.assign({ message: errText(v) }, v.info) : v;
     }
     console.debug('[cleanlink]', event, entry);
-    unsaved.push(entry);
+    mine.push(entry);
+    dirty = true;
     if (!saveTimer) saveTimer = setTimeout(flushLog, 500);
   }
 
@@ -308,7 +319,7 @@
       script: 'IG/FB Clean Link', version: VERSION, host: location.hostname,
       blockOnFailure: CONFIG.blockOnFailure, ua: navigator.userAgent, exported: new Date().toISOString(),
     };
-    return [head, ...readLog()].map((x) => JSON.stringify(x)).join('\n');
+    return [head, ...mergedLog()].map((x) => JSON.stringify(x)).join('\n');
   }
 
   window.__igFbCleanLinkLog = () => {
