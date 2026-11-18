@@ -47,6 +47,10 @@ Tampermonkey 會依腳本內的 `@updateURL` 定期檢查這個 repo，有新版
 node --test tests/
 ```
 
+## 授權
+
+[MIT](LICENSE)
+
 ## 致謝
 
 構想來自 [Jwander0820/threads-plugin](https://github.com/Jwander0820/threads-plugin)。
