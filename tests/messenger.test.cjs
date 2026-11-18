@@ -2,19 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { findShareInFrame, replaceShareInFrame } = require('../ig-fb-cleanlink.user.js');
 
-const SEP = '\\\\\\/'; // 三個反斜線 + /，與實際封包的跳脫層級相同
-
-/** 仿照實測抓到的 /ws/lightspeed 封包：一個 "{}" 區段 + 一個帶三層 JSON 的資料區段。 */
-function buildFrame(url) {
-  const esc = (s) => JSON.stringify(s).replace(/\//g, '\\/'); // FB 的 JSON 會跳脫斜線
-  const inner = esc({ thread_id: 123456789, otid: '7400000000000000000', send_type: 6, text: '', url });
-  const payload = esc({ epoch_id: 7400000000000000000n.toString(), tasks: [{ label: '46', payload: inner, queue_name: '123', task_id: 3 }], version_id: '1' });
-  const json = `{"app_id":"2220391788200892","payload":${JSON.stringify(payload)},"request_id":9,"type":3}`;
-  const body = Buffer.concat([Buffer.from([0x00, 0x80]), Buffer.from(json, 'latin1')]);
-  const head1 = Buffer.from([0x0f, 0x1a, 0x00, 0x02, 0x00, 0x00, 0x7b, 0x7d]);
-  const head2 = Buffer.from([0x0d, 0x1a, 0x00, body.length & 0xff, body.length >> 8, 0x00]);
-  return new Uint8Array(Buffer.concat([head1, head2, body]));
-}
+const { buildFrame } = require('./helpers/frame.cjs');
 
 test('Messenger：找到封包裡的 share 連結並改寫', () => {
   const frame = buildFrame('https://www.facebook.com/share/p/1AbCdEfGhJ/');
@@ -37,6 +25,25 @@ test('Messenger：找到封包裡的 share 連結並改寫', () => {
   const before = Buffer.from(frame).toString('latin1');
   assert.equal(text.slice(0, found.index).slice(14), before.slice(0, found.index).slice(14));
   assert.equal(text.slice(-40), before.slice(-40));
+});
+
+test('Messenger：同一個封包有多個 share 連結時逐一改寫', () => {
+  let frame = buildFrame('https://www.facebook.com/share/p/1AbCdEfGhJ/', 'https://www.facebook.com/share/r/2KlMnOpQrS/');
+  const seen = [];
+  for (let found; (found = findShareInFrame(frame));) {
+    assert.equal(found.error, undefined);
+    seen.push(found.url);
+    frame = replaceShareInFrame(frame, found, `https://www.facebook.com/reel/${seen.length}`);
+    assert.ok(seen.length <= 2);
+  }
+  assert.deepEqual(seen.sort(), [
+    'https://www.facebook.com/share/p/1AbCdEfGhJ/',
+    'https://www.facebook.com/share/r/2KlMnOpQrS/',
+  ]);
+  const text = Buffer.from(frame).toString('latin1');
+  assert.equal(frame[11] | (frame[12] << 8), frame.length - 14);
+  const inner = JSON.parse(JSON.parse(JSON.parse(text.slice(text.indexOf('{"app_id"'))).payload).tasks[0].payload);
+  assert.deepEqual([inner.text, inner.url].sort(), ['https://www.facebook.com/reel/1', 'https://www.facebook.com/reel/2']);
 });
 
 test('Messenger：無關的封包不處理', () => {

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         IG/FB Clean Link
 // @namespace    ig-fb-cleanlink
-// @version      0.3.2
+// @version      0.4.0
 // @description  複製 Instagram / Facebook 連結時自動去除追蹤碼；FB 的 /share/ 短連結會換成 permalink。
 // @match        https://www.facebook.com/*
 // @match        https://web.facebook.com/*
@@ -25,7 +25,10 @@
     showToast: true,
     resolveTimeoutMs: 8000,
     cleanMessenger: true, // 「以 Messenger 傳送」時把 share 連結換成 permalink
-    messengerHoldMs: 4000, // 等待解析的上限，超過就照原樣送出
+    messengerHoldMs: 10000, // Messenger 訊息等待解析的上限
+    blockOnFailure: true, // 轉換失敗時擋下 share 連結（不複製、不傳送）；false 則照原樣放行
+    resolveRetries: 1, // 解析失敗後再試幾次
+    debugLogSize: 200, // 除錯紀錄保留筆數
   };
 
   // ───────────────────────── 網址清理（純函式） ─────────────────────────
@@ -229,7 +232,7 @@
   // ───────────────────────── 瀏覽器端 ─────────────────────────
 
   // @grant none：腳本直接跑在頁面環境，才能攔到頁面自己的剪貼簿呼叫
-  const VERSION = '0.3.2'; // 與檔頭 @version 一致
+  const VERSION = '0.4.0'; // 與檔頭 @version 一致
   const running = window.__igFbCleanLink;
   if (running) {
     // 已有另一份在跑。版本不同代表 Tampermonkey 裡同時啟用了新舊兩份，新功能不會生效。
@@ -252,45 +255,128 @@
   }
   window.__igFbCleanLink = VERSION;
   console.info(`[cleanlink] IG/FB Clean Link v${VERSION} 已啟用`);
-  const log = (...a) => console.debug('[cleanlink]', ...a);
+
+  // ── 除錯紀錄 ──
+  // 存在這個網站的 localStorage，只留最近幾筆，不會傳到任何地方。
+  // 取出方式：失敗提示上的「複製除錯紀錄」，或在 Console 執行 __igFbCleanLinkLog()
+
+  const LOG_KEY = 'igFbCleanLink.log';
+  let unsaved = [];
+  let saveTimer = 0;
+
+  function errText(e) {
+    if (!e) return '未知錯誤';
+    const name = e.name && e.name !== 'Error' ? e.name + ': ' : '';
+    return name + (e.message || String(e));
+  }
+
+  function readLog() {
+    try {
+      const saved = JSON.parse(localStorage.getItem(LOG_KEY) || '[]');
+      return Array.isArray(saved) ? saved : [];
+    } catch {
+      return [];
+    }
+  }
+
+  function flushLog() {
+    clearTimeout(saveTimer);
+    saveTimer = 0;
+    if (!unsaved.length) return;
+    const all = readLog().concat(unsaved); // 重新讀取再合併，多個分頁才不會互相蓋掉
+    unsaved = [];
+    try {
+      localStorage.setItem(LOG_KEY, JSON.stringify(all.slice(-CONFIG.debugLogSize)));
+    } catch {
+      // localStorage 不能用就只留在 console
+    }
+  }
+
+  function record(event, data) {
+    const entry = { t: new Date().toISOString(), e: event };
+    for (const [k, v] of Object.entries(data || {})) {
+      entry[k] = v instanceof Error ? Object.assign({ message: errText(v) }, v.info) : v;
+    }
+    console.debug('[cleanlink]', event, entry);
+    unsaved.push(entry);
+    if (!saveTimer) saveTimer = setTimeout(flushLog, 500);
+  }
+
+  function dumpLog() {
+    flushLog();
+    const head = {
+      script: 'IG/FB Clean Link', version: VERSION, host: location.hostname,
+      blockOnFailure: CONFIG.blockOnFailure, ua: navigator.userAgent, exported: new Date().toISOString(),
+    };
+    return [head, ...readLog()].map((x) => JSON.stringify(x)).join('\n');
+  }
+
+  window.__igFbCleanLinkLog = () => {
+    const text = dumpLog();
+    console.log(text);
+    return text;
+  };
+  window.addEventListener('pagehide', flushLog);
+  record('start', { path: location.pathname });
+
+  // ── 提示 ──
 
   let toastEl = null;
   let toastTimer = 0;
-  function toast(msg, warning) {
-    if ((!CONFIG.showToast && !warning) || !document.body) return;
+  let toastSticky = false;
+
+  function hideToast() {
+    if (!toastEl) return;
+    clearTimeout(toastTimer);
+    toastSticky = false;
+    toastEl.style.opacity = '0';
+    toastEl.style.pointerEvents = 'none';
+  }
+
+  /**
+   * @param {string} msg
+   * @param {{warning?:boolean, sticky?:boolean, actions?:{label:string, fn:Function}[]}} [opts]
+   *   warning：橘色、可點擊關閉；sticky：不自動消失；actions：附加按鈕
+   */
+  function toast(msg, opts = {}) {
+    if ((!CONFIG.showToast && !opts.warning) || !document.body) return;
+    if (toastSticky && !opts.warning) return; // 不讓一般提示蓋掉還沒處理的警示
     if (!toastEl) {
       toastEl = document.createElement('div');
       Object.assign(toastEl.style, {
         position: 'fixed', left: '50%', bottom: '32px', transform: 'translateX(-50%)',
         zIndex: '2147483647', padding: '8px 16px', borderRadius: '8px',
         color: '#fff', font: '14px/1.4 system-ui, sans-serif', cursor: 'pointer',
-        transition: 'opacity .2s', maxWidth: '80vw',
-        overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+        transition: 'opacity .2s', maxWidth: '80vw', overflow: 'hidden', textOverflow: 'ellipsis',
       });
-      toastEl.addEventListener('click', () => {
-        toastEl.style.opacity = '0';
-        toastEl.style.pointerEvents = 'none';
-      });
+      toastEl.addEventListener('click', hideToast);
     }
     toastEl.textContent = msg;
+    for (const a of opts.actions || []) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.textContent = a.label;
+      btn.style.cssText = 'margin-left:10px;padding:2px 10px;border-radius:6px;border:1px solid #fff;' +
+        'background:transparent;color:#fff;font:inherit;cursor:pointer';
+      btn.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        hideToast();
+        try {
+          a.fn();
+        } catch (e) {
+          record('error', { where: 'toast action', error: e });
+        }
+      });
+      toastEl.appendChild(btn);
+    }
     toastEl.style.opacity = '1';
-    toastEl.style.background = warning ? 'rgba(176,74,0,.96)' : 'rgba(20,20,20,.92)';
-    toastEl.style.pointerEvents = warning ? 'auto' : 'none'; // 警示可點擊關閉
+    toastEl.style.whiteSpace = opts.warning ? 'normal' : 'nowrap';
+    toastEl.style.background = opts.warning ? 'rgba(176,74,0,.96)' : 'rgba(20,20,20,.92)';
+    toastEl.style.pointerEvents = opts.warning ? 'auto' : 'none';
     if (!toastEl.isConnected) document.body.appendChild(toastEl);
     clearTimeout(toastTimer);
-    toastTimer = setTimeout(() => {
-      toastEl.style.opacity = '0';
-      toastEl.style.pointerEvents = 'none';
-    }, warning ? 15000 : 2500);
-  }
-
-  // FB/IG 改版導致腳本失效時，明確告訴使用者，而不是默默失敗
-  const warned = new Set();
-  function warnNeedsUpdate(reason, detail) {
-    console.warn('[cleanlink] 可能需要更新腳本：' + reason, detail || '');
-    if (warned.has(reason)) return;
-    warned.add(reason);
-    toast('⚠ IG/FB Clean Link 可能需要更新：' + reason + '（這次已照原樣處理）', true);
+    toastSticky = !!opts.sticky;
+    if (!opts.sticky) toastTimer = setTimeout(hideToast, opts.warning ? 15000 : 2500);
   }
 
   function setClipboard(text) {
@@ -299,115 +385,193 @@
       : Promise.reject(new Error('no clipboard API'));
   }
 
+  const logAction = {
+    label: '複製除錯紀錄',
+    fn: () => setClipboard(dumpLog()).then(
+      () => toast('除錯紀錄已複製，可貼到 GitHub issue（內含你轉換過的連結，貼出前請先看過）', { warning: true }),
+      (e) => toast('無法寫入剪貼簿，請在 Console 執行 __igFbCleanLinkLog()：' + errText(e), { warning: true })),
+  };
+
+  /** 失敗原因；FB 改版造成的會提醒需要更新腳本。 */
+  function failText(e) {
+    return errText(e) + (e && e.needsUpdate ? '；FB 可能已改版，腳本需要更新' : '');
+  }
+
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
   // ── FB share 連結 → permalink ──
 
   const resolveCache = new Map(); // share 連結 → Promise<permalink>
 
   async function fetchPermalink(shareUrl) {
-    if (!FB_HOST.test(location.hostname)) throw new Error('只能在 facebook.com 上解析');
+    if (!FB_HOST.test(location.hostname)) {
+      throw Object.assign(new Error('只能在 facebook.com 上解析'), { noRetry: true });
+    }
     const u = new URL(shareUrl);
     u.protocol = 'https:';
     u.host = location.host; // 保持同源，才帶得到登入狀態
     const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), CONFIG.resolveTimeoutMs);
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      ctrl.abort();
+    }, CONFIG.resolveTimeoutMs);
+    const info = {};
+    const fail = (msg, extra) => Object.assign(new Error(msg), { info }, extra);
     try {
       const res = await fetch(u.href, { credentials: 'include', redirect: 'follow', signal: ctrl.signal });
+      info.status = res.status;
+      info.redirected = res.redirected;
       let finalUrl = res.url;
+      if (finalUrl) info.finalPath = new URL(finalUrl).pathname;
       if (!finalUrl || isFbSharePath(new URL(finalUrl).pathname)) {
         finalUrl = extractCanonical(await res.text());
+        info.fromHtml = finalUrl ? new URL(finalUrl, location.origin).pathname : null;
       }
-      if (!finalUrl) throw Object.assign(new Error('找不到正式連結'), { needsUpdate: true });
+      // 回應正常卻找不到 permalink，才算是 FB 改版；否則視為暫時性錯誤
+      const changed = res.ok ? { needsUpdate: true } : null;
+      if (!finalUrl) throw fail(`找不到正式連結（HTTP ${res.status}）`, changed);
       const f = new URL(finalUrl, location.origin);
-      if (/^\/(login|checkpoint)/.test(f.pathname)) throw new Error('需要登入：' + f.pathname);
-      if (isFbSharePath(f.pathname)) {
-        throw Object.assign(new Error('轉址後仍是 share 連結'), { needsUpdate: true });
-      }
+      if (/^\/(login|checkpoint)/.test(f.pathname)) throw fail('需要登入：' + f.pathname, { noRetry: true });
+      if (isFbSharePath(f.pathname)) throw fail(`轉址後仍是 share 連結（HTTP ${res.status}）`, changed);
       const r = cleanUrl(f.href);
-      if (!r || r.needsResolve) throw new Error('解析結果不是 FB 連結');
+      if (!r || r.needsResolve) throw fail('解析結果不是 FB 連結');
       return r.url;
+    } catch (e) {
+      if (timedOut) throw fail(`解析逾時（${CONFIG.resolveTimeoutMs}ms）`);
+      if (!e.info) e.info = info;
+      throw e;
     } finally {
       clearTimeout(timer);
       ctrl.abort(); // 已拿到網址，不必下載整頁
     }
   }
 
+  async function resolveWithRetry(shareUrl) {
+    let lastErr;
+    for (let attempt = 0; attempt <= CONFIG.resolveRetries; attempt++) {
+      if (attempt) await sleep(300);
+      const t0 = Date.now();
+      try {
+        const clean = await fetchPermalink(shareUrl);
+        record('resolve-ok', { url: shareUrl, clean, attempt, ms: Date.now() - t0 });
+        return clean;
+      } catch (e) {
+        lastErr = e;
+        record('resolve-failed', { url: shareUrl, attempt, ms: Date.now() - t0, online: navigator.onLine, error: e });
+        if (e.noRetry) break;
+      }
+    }
+    throw lastErr;
+  }
+
   function getPermalink(shareUrl) {
     let p = resolveCache.get(shareUrl);
     if (!p) {
-      p = fetchPermalink(shareUrl);
+      p = resolveWithRetry(shareUrl);
       resolveCache.set(shareUrl, p);
-      p.catch((e) => {
-        resolveCache.delete(shareUrl);
-        if (e && e.needsUpdate) warnNeedsUpdate('share 連結的解析方式已改變', e);
-      });
+      p.catch(() => resolveCache.delete(shareUrl)); // 失敗的不快取，下次重試
     }
     return p;
   }
 
-  function resolveAndOverwrite(shareUrl) {
-    if (!resolveCache.has(shareUrl)) toast('轉換為乾淨連結中…');
-    getPermalink(shareUrl)
-      .then((clean) => setClipboard(clean).then(() => toast('已複製乾淨連結：' + clean)))
-      .catch((e) => {
-        log('resolve failed', shareUrl, e);
-        if (!(e && e.needsUpdate)) toast('無法轉換，剪貼簿仍是原本的 share 連結');
+  /** 把解析好的乾淨連結寫進剪貼簿；寫不進去（例如已切到別的視窗）就留一個按鈕讓使用者補按。 */
+  function writeClean(clean) {
+    return setClipboard(clean).then(
+      () => toast('已複製乾淨連結：' + clean),
+      (e) => {
+        record('clipboard-write-failed', { clean, focused: document.hasFocus(), error: e });
+        toast('⚠ 乾淨連結已取得，但寫不進剪貼簿（分頁不在前景？）', {
+          warning: true, sticky: true,
+          actions: [{ label: '複製乾淨連結', fn: () => setClipboard(clean).then(() => toast('已複製乾淨連結：' + clean)) }, logAction],
+        });
       });
   }
 
-  // ── 攔截剪貼簿寫入 ──
-  // 原本的寫入一律照常進行；需要非同步處理時，事後再覆寫一次。
+  /**
+   * 複製到 share 連結時：解析成 permalink 再寫入剪貼簿。永遠不會 reject。
+   * @param {boolean} blocked 原本的 share 連結是否已被擋下（沒進剪貼簿）
+   */
+  function resolveForCopy(shareUrl, original, blocked, via) {
+    record('copy-share', { via, url: shareUrl, blocked });
+    if (!resolveCache.has(shareUrl)) toast('轉換為乾淨連結中…');
+    return getPermalink(shareUrl).then(writeClean, (e) => {
+      const actions = [logAction];
+      if (blocked) {
+        actions.unshift({
+          label: '改複製原連結',
+          fn: () => setClipboard(original).then(() => toast('已複製原本的 share 連結'), (e2) =>
+            record('clipboard-write-failed', { focused: document.hasFocus(), error: e2 })),
+        });
+      }
+      toast(blocked
+        ? `⚠ 轉換失敗，已擋下 share 連結，剪貼簿沒有變更（${failText(e)}）`
+        : `⚠ 轉換失敗，剪貼簿仍是原本的 share 連結（${failText(e)}）`,
+      { warning: true, sticky: blocked, actions });
+    });
+  }
 
-  const expose = (fn) => fn;
+  // ── 攔截剪貼簿寫入 ──
+  // blockOnFailure 開啟時，share 連結不會先進剪貼簿，等解析成功才寫入乾淨連結；
+  // 關閉時照舊：原本的寫入先進行，解析成功後再覆寫一次。
+
   const clipProto = window.Clipboard && window.Clipboard.prototype;
   const origWriteText = clipProto && clipProto.writeText;
   const origWrite = clipProto && clipProto.write;
 
-  function handleCopiedText(text) {
-    const r = cleanText(text);
-    if (!r) return text;
-    if (r.needsResolve) {
-      resolveAndOverwrite(r.url);
-      return text;
+  function safeCleanText(text, where) {
+    try {
+      return cleanText(text);
+    } catch (e) {
+      record('error', { where, error: e });
+      return null;
     }
-    if (!r.changed) return text;
-    toast('已複製乾淨連結');
-    return r.url;
   }
 
   if (origWriteText) {
-    clipProto.writeText = expose(function (text) {
-      let out = text;
-      try {
-        out = handleCopiedText(text);
-      } catch (e) {
-        log(e);
+    clipProto.writeText = function (text) {
+      const r = safeCleanText(text, 'writeText');
+      if (!r) return origWriteText.call(this, text);
+      if (r.needsResolve) {
+        if (CONFIG.blockOnFailure) return resolveForCopy(r.url, text, true, 'writeText');
+        const p = origWriteText.call(this, text);
+        resolveForCopy(r.url, text, false, 'writeText');
+        return p;
       }
-      return origWriteText.call(this, out);
-    });
-  }
-
-  async function postProcessItems(items) {
-    for (const item of items) {
-      if (!item.types || !Array.prototype.includes.call(item.types, 'text/plain')) continue;
-      const text = await (await item.getType('text/plain')).text();
-      const r = cleanText(text);
-      if (!r) return;
-      if (r.needsResolve) resolveAndOverwrite(r.url);
-      else if (r.changed) setClipboard(r.url).then(() => toast('已複製乾淨連結'));
-      return;
-    }
+      if (!r.changed) return origWriteText.call(this, text);
+      toast('已複製乾淨連結');
+      return origWriteText.call(this, r.url);
+    };
   }
 
   if (origWrite) {
-    clipProto.write = expose(function (items) {
-      const p = origWrite.call(this, items);
+    clipProto.write = function (items) {
+      const self = this;
+      let item = null;
       try {
-        postProcessItems(items).catch(log);
+        item = Array.prototype.find.call(items, (it) =>
+          it && it.types && Array.prototype.includes.call(it.types, 'text/plain'));
       } catch (e) {
-        log(e);
+        record('error', { where: 'write', error: e });
       }
-      return p;
-    });
+      if (!item) return origWrite.call(self, items);
+      return item.getType('text/plain').then((b) => b.text()).then((text) => {
+        const r = safeCleanText(text, 'write');
+        if (!r) return origWrite.call(self, items);
+        if (r.needsResolve) {
+          if (CONFIG.blockOnFailure) return resolveForCopy(r.url, text, true, 'write');
+          return origWrite.call(self, items).then(() => {
+            resolveForCopy(r.url, text, false, 'write');
+          });
+        }
+        if (!r.changed) return origWrite.call(self, items);
+        toast('已複製乾淨連結');
+        return origWriteText.call(self, r.url);
+      }, (e) => {
+        record('error', { where: 'write getType', error: e });
+        return origWrite.call(self, items);
+      });
+    };
   }
 
   // 舊式 execCommand('copy')，以及使用者自己選取網址按 Ctrl+C
@@ -421,10 +585,13 @@
 
   document.addEventListener('copy', (e) => {
     try {
-      const r = cleanText(selectedText());
+      const text = selectedText();
+      const r = cleanText(text);
       if (!r) return;
       if (r.needsResolve) {
-        resolveAndOverwrite(r.url);
+        // 取消預設行為且不放任何資料：剪貼簿維持原狀，share 連結不會進去
+        if (CONFIG.blockOnFailure) e.preventDefault();
+        resolveForCopy(r.url, text.trim(), CONFIG.blockOnFailure, 'copy-event');
         return;
       }
       if (!r.changed || !e.clipboardData) return;
@@ -432,17 +599,21 @@
       e.preventDefault();
       toast('已複製乾淨連結');
     } catch (err) {
-      log(err);
+      record('error', { where: 'copy-event', error: err });
     }
   }, true);
 
   // ── 以 Messenger 傳送 ──
   // 送出前先扣住封包，解析出 permalink 後改寫再放行。期間同一條連線的其他封包
-  // 依序排隊，維持原本順序。任何一步失敗都照原樣送出，不擋訊息。
+  // 依序排隊（排隊中的封包放行前也會檢查），維持原本順序。
+  // 失敗時：blockOnFailure 開啟就不送出這則訊息，並留一個「仍用 share 連結送出」的按鈕；
+  // 關閉就照原樣送出。
 
   const wsProto = window.WebSocket && window.WebSocket.prototype;
   const origSend = wsProto && wsProto.send;
-  const heldQueues = new WeakMap();
+  const heldQueues = new WeakMap(); // 連線 → 排隊中的封包
+  const MAX_LINKS_PER_FRAME = 8;
+  let warnedTextFrame = false;
 
   function toBytes(data) {
     if (data instanceof ArrayBuffer) return new Uint8Array(data.slice(0));
@@ -452,19 +623,134 @@
     return null;
   }
 
+  function wsPath(ws) {
+    try {
+      return new URL(ws.url).pathname;
+    } catch {
+      return '?';
+    }
+  }
+
+  /** 給除錯紀錄用的封包摘要：長度、開頭幾個位元組、share 連結附近的內容。 */
+  function frameInfo(text, length) {
+    const i = text.search(FRAME_SHARE_LOOSE);
+    const hex = (c) => c.charCodeAt(0).toString(16).padStart(2, '0');
+    return {
+      len: length,
+      head: Array.from(text.slice(0, 14), hex).join(' '),
+      near: i < 0 ? '' : text.slice(Math.max(0, i - 30), i + 90).replace(/[^\x20-\x7e]/g, '.'),
+    };
+  }
+
+  /** 這個封包需要改寫嗎？回傳複製出來的位元組，不需要就回傳 null。 */
   function inspectOutgoing(ws, data) {
-    if (!FB_HOST.test(location.hostname) || !/lightspeed/.test(ws.url)) return null;
-    const bytes = toBytes(data);
-    if (!bytes) return null;
-    const found = findShareInFrame(bytes);
-    if (!found) return null;
-    if (found.error) {
-      warnNeedsUpdate(found.error);
+    if (!FB_HOST.test(location.hostname)) return null;
+    if (typeof data === 'string') {
+      // 目前 FB 只用二進位封包；若哪天改成文字，至少留下紀錄並提醒
+      if (data.length < 200000 && data.includes('tasks') && FRAME_SHARE_LOOSE.test(data)) {
+        record('messenger-text-frame', { ws: wsPath(ws), frame: frameInfo(data, data.length) });
+        if (!warnedTextFrame) {
+          warnedTextFrame = true;
+          toast('⚠ Messenger 的封包格式已改變，這則訊息已照原樣送出；腳本需要更新', { warning: true, actions: [logAction] });
+        }
+      }
       return null;
     }
-    const r = cleanUrl(found.url);
-    if (!r || !r.needsResolve) return null;
-    return { bytes, found, shareUrl: r.url };
+    const bytes = toBytes(data);
+    return bytes && findShareInFrame(bytes) ? bytes : null;
+  }
+
+  function withTimeout(promise, ms) {
+    let timer;
+    const timeout = new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`等待解析逾時（${CONFIG.messengerHoldMs}ms）`)), Math.max(0, ms));
+    });
+    return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+  }
+
+  /** 把封包裡所有 share 連結換成 permalink；任何一步失敗就 reject，不會送出改到一半的封包。 */
+  async function rewriteFrame(bytes) {
+    const deadline = Date.now() + CONFIG.messengerHoldMs;
+    const changed = (msg) => Object.assign(new Error(msg), { needsUpdate: true });
+    const urls = [];
+    let cur = bytes;
+    for (;;) {
+      const found = findShareInFrame(cur);
+      if (!found) return { bytes: cur, urls };
+      if (found.error) throw changed(found.error);
+      if (urls.length >= MAX_LINKS_PER_FRAME) throw new Error('封包裡的 share 連結太多');
+      const r = cleanUrl(found.url);
+      if (!r || !r.needsResolve) throw changed('封包裡的連結無法辨識');
+      const clean = await withTimeout(getPermalink(r.url), deadline - Date.now());
+      const out = replaceShareInFrame(cur, found, clean);
+      if (!out) throw changed('無法改寫 Messenger 封包');
+      cur = out;
+      urls.push(clean);
+    }
+  }
+
+  function rawSend(ws, data) {
+    try {
+      if (ws.readyState === 1) {
+        origSend.call(ws, data);
+        return true;
+      }
+      record('messenger-socket-closed', { ws: wsPath(ws), readyState: ws.readyState });
+    } catch (e) {
+      record('error', { where: 'ws send', error: e });
+    }
+    toast('⚠ 連線已中斷，訊息可能沒有送出，請到 Messenger 確認', { warning: true, actions: [logAction] });
+    return false;
+  }
+
+  /** 放行排隊中的封包；遇到另一個需要改寫的就再扣住。 */
+  function drain(ws) {
+    const queue = heldQueues.get(ws);
+    while (queue && queue.length) {
+      const data = queue.shift();
+      let bytes = null;
+      try {
+        bytes = inspectOutgoing(ws, data);
+      } catch (e) {
+        record('error', { where: 'inspect', error: e });
+      }
+      if (bytes) {
+        processHeld(ws, bytes);
+        return;
+      }
+      rawSend(ws, data);
+    }
+    heldQueues.delete(ws);
+  }
+
+  function processHeld(ws, original) {
+    const t0 = Date.now();
+    rewriteFrame(original).then(({ bytes, urls }) => {
+      record('messenger-rewritten', { ms: Date.now() - t0, urls });
+      if (rawSend(ws, bytes)) toast('已用乾淨連結傳送：' + urls[0]);
+    }, (e) => {
+      const blocked = CONFIG.blockOnFailure;
+      record('messenger-failed', {
+        ms: Date.now() - t0, blocked, ws: wsPath(ws), error: e,
+        frame: frameInfo(latin1.decode(original), original.length),
+      });
+      if (!blocked) {
+        rawSend(ws, original);
+        toast(`⚠ 轉換失敗，已用原本的 share 連結傳送（${failText(e)}）`, { warning: true, actions: [logAction] });
+        return;
+      }
+      toast(`⚠ 轉換失敗，已擋下這則 Messenger 訊息，沒有送出（${failText(e)}）`, {
+        warning: true, sticky: true,
+        actions: [{
+          label: '仍用 share 連結送出',
+          fn: () => {
+            const ok = rawSend(ws, original);
+            record('messenger-sent-original', { ok });
+            if (ok) toast('已用原本的 share 連結送出');
+          },
+        }, logAction],
+      });
+    }).catch((e) => record('error', { where: 'processHeld', error: e })).then(() => drain(ws));
   }
 
   if (CONFIG.cleanMessenger && origSend) {
@@ -474,44 +760,15 @@
         queue.push(data);
         return undefined;
       }
-      let job = null;
+      let bytes = null;
       try {
-        job = inspectOutgoing(this, data);
+        bytes = inspectOutgoing(this, data);
       } catch (e) {
-        log(e);
+        record('error', { where: 'inspect', error: e });
       }
-      if (!job) return origSend.call(this, data);
-
-      const ws = this;
-      const pending = [];
-      heldQueues.set(ws, pending);
-      const release = (first) => {
-        heldQueues.delete(ws);
-        for (const d of [first, ...pending]) {
-          try {
-            if (ws.readyState === 1) origSend.call(ws, d);
-            else toast('⚠ 連線已中斷，訊息可能沒有送出，請到 Messenger 確認', true);
-          } catch (e) {
-            log(e);
-          }
-        }
-      };
-      const timeout = new Promise((_, reject) =>
-        setTimeout(() => reject(new Error('timeout')), CONFIG.messengerHoldMs));
-      Promise.race([getPermalink(job.shareUrl), timeout]).then((clean) => {
-        const out = replaceShareInFrame(job.bytes, job.found, clean);
-        if (!out) {
-          warnNeedsUpdate('無法改寫 Messenger 封包', clean);
-          release(job.bytes);
-          return;
-        }
-        release(out);
-        toast('已用乾淨連結傳送：' + clean);
-      }, (e) => {
-        log('messenger resolve failed', e);
-        release(job.bytes);
-        if (!(e && e.needsUpdate)) toast('無法轉換，已用原本的 share 連結傳送');
-      });
+      if (!bytes) return origSend.call(this, data);
+      heldQueues.set(this, []);
+      processHeld(this, bytes);
       return undefined;
     };
   }
@@ -530,7 +787,7 @@
         history.replaceState(history.state, '', r.url);
         lastHref = location.href;
       } catch (e) {
-        log(e);
+        record('error', { where: 'address bar', error: e });
       }
     };
     tidy();

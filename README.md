@@ -8,7 +8,8 @@ Tampermonkey 腳本：在 Instagram 與 Facebook 網頁版取得不帶追蹤碼�
 - **以 Messenger 傳送**：送出前把訊息裡的 share 連結換成 permalink。
 - **網址列**：自動移除 `fbclid`、`igsh`、`__cft__` 等追蹤參數。
 - **連結跳板**：`l.facebook.com/l.php?u=…` 還原成目標網址。
-- **改版警示**：偵測到 FB 的格式改變、無法安全處理時，跳出橘色提示並照原樣處理，不會擋下複製或訊息。
+- **失敗時擋下**：轉換不成功（逾時、斷線、FB 改版）時，share 連結不會進剪貼簿，Messenger 訊息也不會送出，並跳出橘色提示說明原因。提示上有按鈕可以改用原本的 share 連結。
+- **除錯紀錄**：每次轉換的結果與失敗原因都會記下來，方便回報問題。
 
 ## 安裝
 
@@ -32,13 +33,27 @@ Tampermonkey 會依腳本內的 `@updateURL` 定期檢查這個 repo，有新版
 | `cleanMessenger` | `true` | 以 Messenger 傳送時改寫連結 |
 | `showToast` | `true` | 顯示一般提示（警示一律顯示） |
 | `resolveTimeoutMs` | `8000` | 解析 share 連結的逾時 |
-| `messengerHoldMs` | `4000` | Messenger 訊息等待解析的上限，超過就照原樣送出 |
+| `resolveRetries` | `1` | 解析失敗後再試幾次 |
+| `messengerHoldMs` | `10000` | Messenger 訊息等待解析的上限 |
+| `blockOnFailure` | `true` | 轉換失敗時擋下 share 連結；設為 `false` 則照原樣複製、傳送 |
+| `debugLogSize` | `200` | 除錯紀錄保留筆數 |
+
+## 轉換失敗時
+
+橘色提示會寫出原因，並提供按鈕：
+
+- **改複製原連結** / **仍用 share 連結送出**：這次不轉換，直接用原本的連結。
+- **複製除錯紀錄**：把紀錄複製到剪貼簿，可以貼到 [issue](https://github.com/orsmile/ig-fb-cleanlink/issues)。
+
+也可以按 F12，在 Console 執行 `__igFbCleanLinkLog()` 取得紀錄。紀錄存在瀏覽器的 localStorage（FB 與 IG 各一份），只保留最近 200 筆，不會傳到任何地方。內容包含你轉換過的連結，貼到公開場合前請先看過。
+
+被擋下的 Messenger 訊息沒有送到對方，但 FB 的畫面上可能仍顯示成已送出，請以橘色提示為準。
 
 ## 限制
 
 - 只對桌面版網頁有效，IG / FB 原生 App 無法介入。
 - 解析 share 連結時，會以你的登入狀態向 FB 開啟一次該連結。
-- Messenger 改寫依賴 FB 未公開的內部封包格式，FB 改版後可能失效。若 FB 改用完全不同的傳送方式，腳本偵測不到，也不會警示。
+- Messenger 改寫依賴 FB 未公開的內部封包格式，FB 改版後可能失效。若 FB 改用完全不同的傳送方式，腳本偵測不到，擋不下來也不會警示。
 - 僅在 Chrome + Tampermonkey 上測試過。
 
 ## 測試
