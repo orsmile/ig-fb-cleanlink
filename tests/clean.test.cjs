@@ -111,3 +111,10 @@ test('extractCanonical：從 HTML 取正式連結', () => {
     'https://www.facebook.com/reel/1');
   assert.equal(extractCanonical('<html></html>'), null);
 });
+
+test('檔頭 @version 與程式內的 VERSION 一致', () => {
+  const src = require('node:fs').readFileSync(require.resolve('../ig-fb-cleanlink.user.js'), 'utf8');
+  const header = /^\/\/ @version\s+(\S+)/m.exec(src)[1];
+  const inCode = /const VERSION = '([^']+)'/.exec(src)[1];
+  assert.equal(header, inCode);
+});

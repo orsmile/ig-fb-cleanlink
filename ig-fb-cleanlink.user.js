@@ -1,12 +1,16 @@
 // ==UserScript==
 // @name         IG/FB Clean Link
 // @namespace    ig-fb-cleanlink
-// @version      0.3.1
+// @version      0.3.2
 // @description  複製 Instagram / Facebook 連結時自動去除追蹤碼；FB 的 /share/ 短連結會換成 permalink。
 // @match        https://www.facebook.com/*
 // @match        https://web.facebook.com/*
 // @match        https://m.facebook.com/*
 // @match        https://www.instagram.com/*
+// @homepageURL  https://github.com/orsmile/ig-fb-cleanlink
+// @supportURL   https://github.com/orsmile/ig-fb-cleanlink/issues
+// @updateURL    https://raw.githubusercontent.com/orsmile/ig-fb-cleanlink/main/ig-fb-cleanlink.user.js
+// @downloadURL  https://raw.githubusercontent.com/orsmile/ig-fb-cleanlink/main/ig-fb-cleanlink.user.js
 // @run-at       document-start
 // @inject-into  page
 // @grant        none
@@ -225,7 +229,7 @@
   // ───────────────────────── 瀏覽器端 ─────────────────────────
 
   // @grant none：腳本直接跑在頁面環境，才能攔到頁面自己的剪貼簿呼叫
-  const VERSION = '0.3.1'; // 與檔頭 @version 一致
+  const VERSION = '0.3.2'; // 與檔頭 @version 一致
   const running = window.__igFbCleanLink;
   if (running) {
     // 已有另一份在跑。版本不同代表 Tampermonkey 裡同時啟用了新舊兩份，新功能不會生效。

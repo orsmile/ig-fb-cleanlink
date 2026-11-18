@@ -13,14 +13,18 @@ Tampermonkey 腳本：在 Instagram 與 Facebook 網頁版取得不帶追蹤碼�
 ## 安裝
 
 1. 安裝 [Tampermonkey](https://www.tampermonkey.net/)（Chrome / Edge）。
-2. 在 Tampermonkey 新增腳本，貼上 [`ig-fb-cleanlink.user.js`](ig-fb-cleanlink.user.js) 的完整內容並存檔。
+2. 點這個連結：**[安裝 IG/FB Clean Link](https://raw.githubusercontent.com/orsmile/ig-fb-cleanlink/main/ig-fb-cleanlink.user.js)**，Tampermonkey 會跳出安裝頁，按「安裝」。
 3. 重新整理 IG / FB 分頁。按 F12 在 Console 看到 `IG/FB Clean Link v… 已啟用` 即載入成功。
 
-更新時請覆蓋原本那一份，不要另外新增；兩個版本同時啟用時腳本會提示。
+## 更新
+
+Tampermonkey 會依腳本內的 `@updateURL` 定期檢查這個 repo，有新版就自動更新。要立刻更新，可在 Tampermonkey 管理面板對這個腳本按「檢查更新」，或再點一次上面的安裝連結。
+
+如果你之前是用手動貼上的方式安裝，請先在管理面板刪掉舊的那份，再用安裝連結裝一次，之後才會自動更新。兩個版本同時啟用時腳本會提示。
 
 ## 設定
 
-檔案開頭的 `CONFIG`：
+檔案開頭的 `CONFIG`。注意：自動更新會覆蓋你在 Tampermonkey 裡改過的設定，更新後需要重改一次。
 
 | 選項 | 預設 | 說明 |
 |---|---|---|
